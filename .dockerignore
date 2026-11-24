@@ -1,0 +1,6 @@
+android
+dist
+build
+.github
+*.iss
+*.bat

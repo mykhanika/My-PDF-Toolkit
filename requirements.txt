@@ -1,0 +1,9 @@
+flask
+pymupdf
+pikepdf
+pdf2docx
+pytesseract
+pillow
+pywebview
+pyinstaller
+mammoth

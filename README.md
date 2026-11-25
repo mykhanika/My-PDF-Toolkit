@@ -27,11 +27,17 @@ The APK is a window onto a PDF Toolkit server (the PDF engine, OCR and Word conv
 2. Wait for Gradle sync to finish. Then **Build, Build Bundle(s) / APK(s), Build APK(s)**.
 3. The file is at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-## Side panes (View tab)
-In **View → Panes** you can switch three optional panels on or off. Your choice is remembered.
-- **Pages:** page thumbnails on the left. Click one to jump to that page.
-- **Recent Files:** a list on the left of PDFs you opened lately (desktop app only). A private copy is kept on your PC in `%APPDATA%\PDFToolkit\recent` (up to 15 files). Password-protected files stay protected. Use the ✕ to remove one or **Clear** to remove all.
-- **Quick Tools:** a column of buttons on the right for the tools you use most (markup, add text/image/signature/stamp, rotate and delete pages, Find, Print, Undo, Redo, Save).
+## Side panes (View tab, or the small buttons at the bottom right)
+Switch each panel on or off in **View → Panes** or with the 🖼 🕘 🧰 buttons in the status bar. Your choices are remembered. Drag the thin bar beside a panel to make it wider or narrower (double-click the bar to reset, or use **View → Reset Widths**).
+- **Pages:** page thumbnails on the left. Click one to jump to the page. **Right-click** a thumbnail for page actions: rotate, insert blank page before or after, duplicate, move up or down or to a position, extract, print or delete the page.
+- **Recent Files:** a list on the left of PDFs you opened lately (desktop app only). A private copy is kept in `%APPDATA%\PDFToolkit\recent` (up to 15 files). Password-protected files stay protected.
+- **Quick Tools:** on from the first launch. Buttons on the right for the tools you use most (markup, add text, image, signature and stamp, rotate and delete pages, Find, Print, Undo, Redo, Save, Save As).
+
+## Saving and closing (desktop app)
+- **Save** (Ctrl+S) writes your changes straight back to the file you opened, with no dialog. A document that has no file yet (merged, converted, or opened from the recent list copy) asks where to save the first time.
+- **Save As** (Ctrl+Shift+S) always asks where to save and then keeps working on the new file.
+- A ● next to the file name means there are unsaved changes. Closing the window, the **✕ Close** button, or opening another file while changes are unsaved shows **Save / Don't save / Cancel**.
+- In a browser or the Android app, Save and Save As download the file, because a web page cannot overwrite files on your device.
 
 ## Notes
 Keep your access key private and use HTTPS on the internet. Uploaded files are deleted from the server after 6 hours.

@@ -21,6 +21,8 @@ NAMES = {}
 IMG = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 RECENT_DIR = Path(os.environ["PDFTK_RECENT"]) if os.environ.get("PDFTK_RECENT") else None   # set by desktop.py only; a shared server keeps no per-user history
 RECENT_MAX, RECENT_MAX_BYTES = 15, 150 * 1024 * 1024
+DESKTOP, DESKTOP_TOKEN = False, None      # set by desktop.py: only then may the page read/write real files on this PC
+SRC = {}                                  # session id -> the file on disk it was opened from (used by plain Save)
 STARTUP = []  # PDF paths given on the command line (set by desktop.py only)
 UI = (BASE / "ui.html").read_text(encoding="utf-8")
 
@@ -79,15 +81,15 @@ def _ridx():
     except Exception: return []
 def _rsave(items):
     RECENT_DIR.mkdir(parents=True, exist_ok=True); (RECENT_DIR / "index.json").write_text(json.dumps(items), encoding="utf-8")
-def recent_add(data, name, pages):
+def recent_add(data, name, pages, src=None):
     """Keep a private copy of a file the user opened so it can be reopened from the Recent list."""
     if not RECENT_DIR or len(data) > RECENT_MAX_BYTES: return
     try:
         import hashlib
         rid = hashlib.sha1(data).hexdigest()[:32]; RECENT_DIR.mkdir(parents=True, exist_ok=True)
         if not (RECENT_DIR / f"{rid}.pdf").exists(): (RECENT_DIR / f"{rid}.pdf").write_bytes(data)
-        items = [i for i in _ridx() if i["id"] != rid]
-        items.insert(0, {"id": rid, "name": name, "size": len(data), "pages": pages, "opened": int(time.time())})
+        prev = next((i for i in _ridx() if i["id"] == rid), {}); items = [i for i in _ridx() if i["id"] != rid]
+        items.insert(0, {"id": rid, "name": name, "size": len(data), "pages": pages, "opened": int(time.time()), "path": src or prev.get("path")})
         for old in items[RECENT_MAX:]:
             try: (RECENT_DIR / f"{old['id']}.pdf").unlink()
             except OSError: pass
@@ -106,8 +108,10 @@ def render_with(pid, fn):
 
 def push_hist(pid):
     h = HIST.setdefault(pid, {"u": [], "r": []}); h["u"].append(path(pid).read_bytes()); del h["u"][:-10]; h["r"].clear()
-def info(pid, doc, msg=None):
-    return jsonify(id=pid, pages=len(doc), name=NAMES.get(pid, "document"), msg=msg,
+def need_desktop():
+    if not DESKTOP or request.headers.get("X-PDFTK") != DESKTOP_TOKEN: abort(403, "Only the desktop app can do this.")
+def info(pid, doc, msg=None, created=False):
+    return jsonify(id=pid, pages=len(doc), name=NAMES.get(pid, "document"), msg=msg, src=SRC.get(pid), created=created,
                    sizes=[[round(p.rect.width, 2), round(p.rect.height, 2)] for p in doc])
 def page_img(page, dpi=200): return Image.open(io.BytesIO(page.get_pixmap(dpi=dpi).tobytes("png")))
 def page_text(page, force=False):
@@ -250,7 +254,7 @@ def print_doc(doc, f, cur):
 
 # ---------- open / merge / convert-to-pdf ----------
 @app.get("/")
-def home(): return Response(UI, mimetype="text/html")
+def home(): return Response(UI.replace("__TOKEN__", DESKTOP_TOKEN or ""), mimetype="text/html")
 
 @app.post("/api/open")
 def open_():
@@ -266,8 +270,30 @@ def startup():
     if not STARTUP: return jsonify(none=True)
     data = Path(STARTUP[0]).read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    recent_add(data, Path(STARTUP[0]).name, len(doc))
-    return info(session(doc, Path(STARTUP.pop(0)).stem), doc)
+    recent_add(data, Path(STARTUP[0]).name, len(doc), STARTUP[0])
+    pid = session(doc, Path(STARTUP[0]).stem); SRC[pid] = STARTUP.pop(0)
+    return info(pid, doc)
+
+@app.post("/api/open-path")
+def open_path():
+    need_desktop(); p = Path(request.form.get("path", ""))
+    if not p.is_file() or p.suffix.lower() != ".pdf": abort(400, "That file is not a PDF.")
+    data = p.read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
+    if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
+    recent_add(data, p.name, len(doc), str(p)); pid = session(doc, p.stem); SRC[pid] = str(p)
+    return info(pid, doc)
+
+@app.post("/api/save-to")
+def save_to():
+    """Plain Save writes back to the file the document came from. With a path given it is Save As."""
+    need_desktop(); f = request.form; pid = f["id"]; doc = load(pid); target = f.get("path") or SRC.get(pid)
+    if not target: abort(400, "This document has no file yet. Use Save As to choose where to put it.")
+    p = Path(target)
+    if p.suffix.lower() != ".pdf": p = p.with_suffix(".pdf")
+    data = doc.tobytes(garbage=3, deflate=True); tmp = p.with_name(p.name + ".tmp~")
+    tmp.write_bytes(data); os.replace(tmp, p)                      # write to a temp file first so a failure never damages the original
+    SRC[pid] = str(p); NAMES[pid] = p.stem; recent_add(data, p.name, len(doc), str(p))
+    return jsonify(ok=True, path=str(p), name=p.stem, size=len(data))
 
 @app.post("/api/merge")
 def merge():
@@ -276,7 +302,7 @@ def merge():
     files = request.files.getlist("files")
     for f in files: res.insert_pdf(fitz.open(stream=f.read(), filetype="pdf"))
     if not len(res): abort(400, "Add at least one PDF.")
-    return info(pid := session(res, "merged"), res, f"Merged into {len(res)} pages.")
+    return info(session(res, "merged"), res, f"Merged into {len(res)} pages.", created=True)
 
 @app.post("/api/to-pdf")
 def to_pdf():
@@ -288,7 +314,7 @@ def to_pdf():
         elif p.suffix in IMG: src = fitz.open("pdf", fitz.open(p).convert_to_pdf())
         else: src = fitz.open(office_to_pdf(p))
         merged.insert_pdf(src)
-    return info(session(merged, Path(files[0].filename).stem), merged, "PDF created. Use Save to download it.")
+    return info(session(merged, Path(files[0].filename).stem), merged, "PDF created. Use Save to keep it.", created=True)
 
 # ---------- viewer ----------
 @app.get("/api/preview/<pid>/<int:pg>")
@@ -298,7 +324,7 @@ def preview(pid, pg):
 
 @app.get("/api/thumb/<pid>/<int:pg>")
 def thumb(pid, pg):
-    w = max(60, min(int(request.args.get("w", 150)), 400))
+    w = max(60, min(int(request.args.get("w", 150)), 800))
     def draw(d):
         p = d[max(0, min(pg, len(d)) - 1)]; z = w / p.rect.width
         return p.get_pixmap(matrix=fitz.Matrix(z, z)).tobytes("jpeg", jpg_quality=75)
@@ -316,8 +342,10 @@ def recent_open():
     if not p.exists(): abort(404, "That file is no longer available. It may have been removed from the list.")
     data = p.read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    name = next((i["name"] for i in _ridx() if i["id"] == rid), "document.pdf"); recent_add(data, name, len(doc))
-    return info(session(doc, Path(name).stem), doc)
+    ent = next((i for i in _ridx() if i["id"] == rid), {}); name = ent.get("name", "document.pdf"); recent_add(data, name, len(doc))
+    pid = session(doc, Path(name).stem)
+    if DESKTOP and ent.get("path") and Path(ent["path"]).is_file(): SRC[pid] = ent["path"]        # plain Save goes back to the original file
+    return info(pid, doc)
 
 @app.post("/api/recent/remove")
 def recent_remove():
@@ -423,7 +451,12 @@ def do(action):
     elif action == "delete":
         if len(doc) < 2: abort(400, "A PDF needs at least one page.")
         doc.delete_page(pi)
-    elif action == "blank": r = doc[pi].rect; doc.new_page(pno=pi + 1, width=r.width, height=r.height)
+    elif action == "blank": r = doc[pi].rect; doc.new_page(pno=pi if f.get("before") else pi + 1, width=r.width, height=r.height)
+    elif action == "duplicate": doc.fullcopy_page(pi, pi + 1 if pi + 1 < len(doc) else -1); msg = f"Page {pi + 1} duplicated."
+    elif action == "move":
+        t = min(max(int(f.get("to", pi + 1)), 1), len(doc)) - 1
+        if t != pi: doc.move_page(pi, t if t < pi else (t + 1 if t + 1 < len(doc) else -1))
+        msg = f"Page moved to position {t + 1}."
     elif action == "strip":
         kind, n = f["kind"], 0
         for p in doc:

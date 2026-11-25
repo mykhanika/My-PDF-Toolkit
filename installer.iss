@@ -35,6 +35,7 @@ Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document\DefaultIcon"; ValueType
 Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document\shell\open\command"; ValueType: string; ValueData: """{app}\PDFToolkit.exe"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "PDFToolkit.Document"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\shell\open\command"; ValueType: string; ValueData: """{app}\PDFToolkit.exe"" ""%1"""; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\DefaultIcon"; ValueType: string; ValueData: "{app}\pdffile.ico"
 Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\SupportedTypes"; ValueType: string; ValueName: ".pdf"; ValueData: ""
 
 [Run]

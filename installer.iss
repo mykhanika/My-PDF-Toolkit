@@ -31,12 +31,14 @@ Name: "{autodesktop}\PDF Toolkit"; Filename: "{app}\PDFToolkit.exe"; Tasks: desk
 
 [Registry]
 Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document"; ValueType: string; ValueData: "PDF Document"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document\DefaultIcon"; ValueType: string; ValueData: "{app}\pdffile.ico"
+Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document\DefaultIcon"; ValueType: string; ValueData: "{app}\pdffile.ico,0"
 Root: HKA; Subkey: "Software\Classes\PDFToolkit.Document\shell\open\command"; ValueType: string; ValueData: """{app}\PDFToolkit.exe"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "PDFToolkit.Document"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\shell\open\command"; ValueType: string; ValueData: """{app}\PDFToolkit.exe"" ""%1"""; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\DefaultIcon"; ValueType: string; ValueData: "{app}\pdffile.ico"
+Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\DefaultIcon"; ValueType: string; ValueData: "{app}\pdffile.ico,0"
 Root: HKA; Subkey: "Software\Classes\Applications\PDFToolkit.exe\SupportedTypes"; ValueType: string; ValueName: ".pdf"; ValueData: ""
 
 [Run]
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden skipifdoesntexist; StatusMsg: "Refreshing icons..."
+Filename: "ms-settings:defaultapps"; Description: "Choose PDF Toolkit as the default PDF app (opens Windows settings)"; Flags: shellexec postinstall skipifsilent unchecked
 Filename: "{app}\PDFToolkit.exe"; Description: "Launch PDF Toolkit"; Flags: nowait postinstall skipifsilent

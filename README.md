@@ -39,5 +39,10 @@ Switch each panel on or off in **View → Panes** or with the 🖼 🕘 🧰 but
 - A ● next to the file name means there are unsaved changes. Closing the window, the **✕ Close** button, or opening another file while changes are unsaved shows **Save / Don't save / Cancel**.
 - In a browser or the Android app, Save and Save As download the file, because a web page cannot overwrite files on your device.
 
+## If the app seems stuck
+- The desktop app shows a purple start-up screen at once, then loads. If something fails during start-up it shows the reason instead of a blank window.
+- Slow jobs (large files, OCR, print preparation) show **Working… N s** in the status bar.
+- A log is kept in `%APPDATA%\PDFToolkit\log.txt`. It lists any request slower than 3 seconds, errors, and the reason if the PDF engine ever crashes. Send that file if a problem keeps happening.
+
 ## Notes
 Keep your access key private and use HTTPS on the internet. Uploaded files are deleted from the server after 6 hours.

@@ -4,7 +4,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import pikepdf
 from urllib.parse import quote
-from flask import Flask, request, send_file, send_from_directory, jsonify, abort, Response
+from flask import Flask, request, send_file, send_from_directory, jsonify, abort, Response, g
 from werkzeug.exceptions import HTTPException
 from pdf2docx import Converter
 from PIL import Image
@@ -21,6 +21,14 @@ NAMES = {}
 IMG = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 RECENT_DIR = Path(os.environ["PDFTK_RECENT"]) if os.environ.get("PDFTK_RECENT") else None   # set by desktop.py only; a shared server keeps no per-user history
 RECENT_MAX, RECENT_MAX_BYTES = 15, 150 * 1024 * 1024
+LOG = Path(os.environ["PDFTK_LOG"]) if os.environ.get("PDFTK_LOG") else None   # desktop app: %APPDATA%\\PDFToolkit\\log.txt
+def log(msg):
+    if not LOG: return
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOG.exists() and LOG.stat().st_size > 1_000_000: LOG.write_text("", encoding="utf-8")
+        with open(LOG, "a", encoding="utf-8") as fh: fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except Exception: pass
 DESKTOP, DESKTOP_TOKEN = False, None      # set by desktop.py: only then may the page read/write real files on this PC
 SRC = {}                                  # session id -> the file on disk it was opened from (used by plain Save)
 STARTUP = []  # PDF paths given on the command line (set by desktop.py only)
@@ -29,6 +37,7 @@ UI = (BASE / "ui.html").read_text(encoding="utf-8")
 @app.errorhandler(Exception)
 def fail(e):
     if isinstance(e, HTTPException): return Response(e.description, e.code)
+    import traceback; log(f"ERROR {request.method} {request.path}: {traceback.format_exc()}")
     return Response(f"{type(e).__name__}: {e}", 500)
 
 # ---------- access key, cleanup, PWA files ----------
@@ -40,6 +49,13 @@ def gate():
 @app.after_request
 def remember_key(r):
     if KEY and request.args.get("key") == KEY: r.set_cookie("k", KEY, max_age=31536000, httponly=True, samesite="Lax")
+    return r
+@app.before_request
+def _t0(): g.t0 = time.time()
+@app.after_request
+def _slow(r):
+    t = time.time() - getattr(g, "t0", time.time())
+    if t > 3: log(f"SLOW {request.method} {request.path} {t:.1f}s (status {r.status_code})")
     return r
 def _sweep():
     while True:
@@ -68,23 +84,46 @@ def out(data, name, mime="application/pdf", info=None):
 def path(pid):
     if not re.fullmatch(r"[0-9a-f]{32}", pid or ""): abort(400, "Bad session id")
     return WORK / f"{pid}.pdf"
-def load(pid):
+_flock = threading.RLock(); _plocks = {}; _rix = threading.Lock()
+def plock(pid): return _plocks.setdefault(pid, threading.RLock())   # one edit at a time per document, so quick clicks never overwrite each other
+def _read(pid):
     p = path(pid)
-    if not p.exists(): abort(404, "Session expired; please re-open the file.")
-    p.touch()
-    return fitz.open(stream=p.read_bytes(), filetype="pdf")
-def store(pid, doc): VERS[pid] = VERS.get(pid, 0) + 1; path(pid).write_bytes(doc.tobytes(garbage=1, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE))
-def session(doc, name):
-    pid = uuid.uuid4().hex; NAMES[pid] = name; store(pid, bake_rotation(doc)); return pid
+    with _flock:
+        if not p.exists(): abort(404, "Session expired; please re-open the file.")
+        p.touch(); return p.read_bytes()
+def _atomic_write(p, data):
+    """Write to a temporary file, then swap it in. A reader never sees a half-written file."""
+    tmp = p.with_name(p.name + ".w~")
+    with _flock:
+        tmp.write_bytes(data)
+        for _ in range(10):
+            try: os.replace(tmp, p); return
+            except PermissionError: time.sleep(0.05)      # Windows: virus scanners can hold a new file for a moment
+        os.replace(tmp, p)
+def load(pid): return fitz.open(stream=_read(pid), filetype="pdf")
+def store(pid, doc):
+    _atomic_write(path(pid), doc.tobytes(garbage=1, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE)); VERS[pid] = VERS.get(pid, 0) + 1
+def _plain(raw):
+    """True when the original bytes can be used as they are (not encrypted)."""
+    try: d = fitz.open(stream=raw, filetype="pdf"); return not (d.needs_pass or d.is_encrypted)
+    except Exception: return False
+def session(doc, name, raw=None):
+    pid = uuid.uuid4().hex; NAMES[pid] = name
+    if raw is not None and _plain(raw) and not any(p.rotation for p in doc): _atomic_write(path(pid), raw); VERS[pid] = 1   # opening: keep the original bytes, no slow rewrite
+    else: store(pid, bake_rotation(doc))
+    return pid
 def _ridx():
     try: return json.loads((RECENT_DIR / "index.json").read_text(encoding="utf-8")) if RECENT_DIR else []
     except Exception: return []
 def _rsave(items):
     RECENT_DIR.mkdir(parents=True, exist_ok=True); (RECENT_DIR / "index.json").write_text(json.dumps(items), encoding="utf-8")
+def recent_bg(*a):
+    threading.Thread(target=recent_add, args=a, daemon=True).start()
 def recent_add(data, name, pages, src=None):
     """Keep a private copy of a file the user opened so it can be reopened from the Recent list."""
     if not RECENT_DIR or len(data) > RECENT_MAX_BYTES: return
     try:
+      with _rix:
         import hashlib
         rid = hashlib.sha1(data).hexdigest()[:32]; RECENT_DIR.mkdir(parents=True, exist_ok=True)
         if not (RECENT_DIR / f"{rid}.pdf").exists(): (RECENT_DIR / f"{rid}.pdf").write_bytes(data)
@@ -99,15 +138,13 @@ def recent_add(data, name, pages, src=None):
 VERS = {}; _rc = {"pid": None, "ver": -1, "doc": None}; _rl = threading.Lock()
 def render_with(pid, fn):
     """Render from one cached open document (much faster for thumbnails and page previews)."""
-    p = path(pid)
-    if not p.exists(): abort(404, "Session expired; please re-open the file.")
     with _rl:
         v = VERS.get(pid, 0)
-        if _rc["pid"] != pid or _rc["ver"] != v: _rc.update(pid=pid, ver=v, doc=fitz.open(stream=p.read_bytes(), filetype="pdf"))
-        p.touch(); return fn(_rc["doc"])
+        if _rc["pid"] != pid or _rc["ver"] != v: _rc.update(pid=pid, ver=v, doc=fitz.open(stream=_read(pid), filetype="pdf"))
+        return fn(_rc["doc"])
 
 def push_hist(pid):
-    h = HIST.setdefault(pid, {"u": [], "r": []}); h["u"].append(path(pid).read_bytes()); del h["u"][:-10]; h["r"].clear()
+    h = HIST.setdefault(pid, {"u": [], "r": []}); h["u"].append(_read(pid)); del h["u"][:-10]; h["r"].clear()
 def need_desktop():
     if not DESKTOP or request.headers.get("X-PDFTK") != DESKTOP_TOKEN: abort(403, "Only the desktop app can do this.")
 def info(pid, doc, msg=None, created=False):
@@ -262,16 +299,16 @@ def open_():
     if not f: abort(400, "No file uploaded.")
     data = f.read(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    recent_add(data, Path(f.filename).name, len(doc))
-    return info(session(doc, Path(f.filename).stem), doc)
+    recent_bg(data, Path(f.filename).name, len(doc))
+    return info(session(doc, Path(f.filename).stem, data), doc)
 
 @app.post("/api/startup")
 def startup():
     if not STARTUP: return jsonify(none=True)
     data = Path(STARTUP[0]).read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    recent_add(data, Path(STARTUP[0]).name, len(doc), STARTUP[0])
-    pid = session(doc, Path(STARTUP[0]).stem); SRC[pid] = STARTUP.pop(0)
+    recent_bg(data, Path(STARTUP[0]).name, len(doc), STARTUP[0])
+    pid = session(doc, Path(STARTUP[0]).stem, data); SRC[pid] = STARTUP.pop(0)
     return info(pid, doc)
 
 @app.post("/api/open-path")
@@ -280,7 +317,7 @@ def open_path():
     if not p.is_file() or p.suffix.lower() != ".pdf": abort(400, "That file is not a PDF.")
     data = p.read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    recent_add(data, p.name, len(doc), str(p)); pid = session(doc, p.stem); SRC[pid] = str(p)
+    recent_bg(data, p.name, len(doc), str(p)); pid = session(doc, p.stem, data); SRC[pid] = str(p)
     return info(pid, doc)
 
 @app.post("/api/save-to")
@@ -292,7 +329,7 @@ def save_to():
     if p.suffix.lower() != ".pdf": p = p.with_suffix(".pdf")
     data = doc.tobytes(garbage=3, deflate=True); tmp = p.with_name(p.name + ".tmp~")
     tmp.write_bytes(data); os.replace(tmp, p)                      # write to a temp file first so a failure never damages the original
-    SRC[pid] = str(p); NAMES[pid] = p.stem; recent_add(data, p.name, len(doc), str(p))
+    SRC[pid] = str(p); NAMES[pid] = p.stem; recent_bg(data, p.name, len(doc), str(p))
     return jsonify(ok=True, path=str(p), name=p.stem, size=len(data))
 
 @app.post("/api/merge")
@@ -342,8 +379,8 @@ def recent_open():
     if not p.exists(): abort(404, "That file is no longer available. It may have been removed from the list.")
     data = p.read_bytes(); doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass and not doc.authenticate(request.form.get("password", "")): return jsonify(needs_password=True)
-    ent = next((i for i in _ridx() if i["id"] == rid), {}); name = ent.get("name", "document.pdf"); recent_add(data, name, len(doc))
-    pid = session(doc, Path(name).stem)
+    ent = next((i for i in _ridx() if i["id"] == rid), {}); name = ent.get("name", "document.pdf"); recent_bg(data, name, len(doc))
+    pid = session(doc, Path(name).stem, data)
     if DESKTOP and ent.get("path") and Path(ent["path"]).is_file(): SRC[pid] = ent["path"]        # plain Save goes back to the original file
     return info(pid, doc)
 
@@ -426,7 +463,9 @@ def apply_ops(doc, ops):
 
 @app.post("/api/apply")
 def apply():
-    pid = request.form["id"]; doc = load(pid); apply_ops(doc, json.loads(request.form.get("ops", "[]"))); push_hist(pid); store(pid, doc); return info(pid, doc)
+    pid = request.form["id"]
+    with plock(pid):
+        doc = load(pid); apply_ops(doc, json.loads(request.form.get("ops", "[]"))); push_hist(pid); store(pid, doc); return info(pid, doc)
 
 # ---------- printing ----------
 @app.post("/api/print/prepare")
@@ -444,6 +483,9 @@ def print_sheet(tok, n):
 # ---------- document actions that change the open document ----------
 @app.post("/api/do/<action>")
 def do(action):
+    with plock(request.form["id"]): return _do(action)
+
+def _do(action):
     f = request.form; pid = f["id"]; doc = load(pid); pi = int(f.get("page", 1)) - 1; msg = None
     if action == "rotate":
         for p in (doc if f.get("scope") == "all" else [doc[pi]]): p.set_rotation((p.rotation + int(f["angle"])) % 360)
@@ -519,8 +561,9 @@ def history(kind):
     if kind not in ("undo", "redo"): abort(404)
     pid = request.form["id"]; h = HIST.setdefault(pid, {"u": [], "r": []}); a, b = ("u", "r") if kind == "undo" else ("r", "u")
     if not h[a]: abort(400, f"Nothing to {kind}.")
-    h[b].append(path(pid).read_bytes()); VERS[pid] = VERS.get(pid, 0) + 1; path(pid).write_bytes(h[a].pop())
-    return info(pid, load(pid), "Undone." if kind == "undo" else "Redone.")
+    with plock(pid):
+        h[b].append(_read(pid)); _atomic_write(path(pid), h[a].pop()); VERS[pid] = VERS.get(pid, 0) + 1
+        return info(pid, load(pid), "Undone." if kind == "undo" else "Redone.")
 
 # ---------- exports (download a file) ----------
 @app.post("/api/export/<action>")

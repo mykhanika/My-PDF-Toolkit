@@ -113,7 +113,12 @@ function dlg(title,html,ok='OK',setup){return new Promise(res=>{const o=document
  o.innerHTML=`<form class="dg"><h3>${title}</h3>${html}<div class="r"><button type="button" class="cx">Cancel</button><button class="b">${ok}</button></div></form>`;document.body.append(o);
  const f=o.firstChild;setup&&setup(f);f.onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(f));const r={d,f,fd:new FormData(f)};o.remove();res(r)};
  f.querySelector('.cx').onclick=()=>{o.remove();res(null)};const i=f.querySelector('input:not([type=file]),select,textarea');i&&i.focus()})}
-async function call(url,fd){toast('Working…');try{const r=await fetch(url,{method:'POST',body:fd,headers:{'X-PDFTK':TOKEN}});if(!r.ok){toast(await r.text(),1);return null}return await r.json()}catch(e){toast(String(e),1);return null}}
+async function call(url,fd){toast('Working…');const t0=Date.now();
+ const tick=setInterval(()=>{const s=Math.round((Date.now()-t0)/1000);if(s>=3)toast('Working… '+s+' s'+(s>=20?'. Large files and OCR can take a while. You can keep waiting.':''))},1000);
+ try{const r=await fetch(url,{method:'POST',body:fd,headers:{'X-PDFTK':TOKEN}});if(!r.ok){toast(await r.text(),1);return null}return await r.json()}
+ catch(e){toast('Lost contact with the program ('+e+'). Close PDF Toolkit and open it again.',1);return null}finally{clearInterval(tick)}}
+addEventListener('unhandledrejection',e=>{toast('Something went wrong: '+((e.reason&&e.reason.message)||e.reason),1)});
+addEventListener('error',e=>{if(e&&e.message)toast('Something went wrong: '+e.message,1)});
 function adopt(j,keep){S.dirty=!!keep||!!j.created;S.src=('src' in j)?(j.src||null):(keep?S.src:null);S.search=null;$('#sn').textContent='';if(!keep){S.ops=[];S.hist=[];S.fut=[];S.sel=null}S.id=j.id;S.pages=j.pages;S.sizes=j.sizes;S.name=j.name;S.pg=keep?Math.min(S.pg,j.pages):1;S.ver++;$('#dn').textContent=j.name+'.pdf';if(j.msg)toast(j.msg);else toast('Ready.');refreshPanes(keep);load()}
 async function commit(){if(!S.ops.length||!S.id)return;const fd=new FormData();fd.append('id',S.id);fd.append('ops',JSON.stringify(S.ops));const j=await call('/api/apply',fd);if(j){S.ops=[];S.hist=[];S.fut=[];S.sel=null;S.ver++;adopt(j,1)}}
 async function mut(a,x={}){await commit();const fd=new FormData();fd.append('id',S.id);fd.append('page',S.pg);for(const k in x)fd.append(k,x[k]);const j=await call('/api/do/'+a,fd);j&&adopt(j,1)}
@@ -160,7 +165,7 @@ async function mergeDlg(){let files=[];await commit();
 async function toPdfDlg(){const r=await dlg('📥 Create PDF from files','<p>Word (.docx), text and images convert right away. Excel, PowerPoint and old .doc files need LibreOffice installed. Several files are merged into one PDF.</p><input type="file" name="files" multiple required>','Convert');
  if(!r)return;const j=await call('/api/to-pdf',r.fd);if(j){S.ops=[];adopt(j);tab('View');zoom('w')}}
 /* ---------- viewer ---------- */
-function load(){if(!S.id)return;const im=new Image(),z=S.Z;S.el=im;
+function load(){if(!S.id)return;if(S.el&&!S.el.complete)S.el.src='';const im=new Image(),z=S.Z;S.el=im;
  im.onload=()=>{if(S.el!==im)return;pv.width=im.width;pv.height=im.height;pv.style.width=pv.style.height='';draw();const vw=$('#vw');
   if(S.anchor){const a=S.anchor;S.anchor=null;vw.scrollLeft=pv.offsetLeft+a.px*S.Z-a.mx;vw.scrollTop=pv.offsetTop+a.py*S.Z-a.my}
   if(S.scrollHit){S.scrollHit=false;scrollToHit()}};
@@ -243,11 +248,16 @@ function applyPanes(refit){
  if(PANES.recent)loadRecent();if(th)buildThumbs();if(PANES.quick)buildQuick();
  if(refit&&S.fit&&S.id)zoom(S.fit)}
 function togglePane(k){PANES[k]=!PANES[k];try{localStorage.setItem(PK,JSON.stringify(PANES))}catch(e){}applyPanes(true)}
-function refreshPanes(keep){if(!keep)applyPanes(false);else if(PANES.pages)buildThumbs()}
-function buildThumbs(){const box=$('#thumbs');box.innerHTML='';S.tw=thumbW();$('#thn').textContent=S.id?S.pages+(S.pages==1?' page':' pages'):'';
+let TIO=null,TQ=[],TB=0;
+function thumbReset(){TQ=[];if(TIO)TIO.disconnect();TIO=('IntersectionObserver' in window)?new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){TIO.unobserve(e.target);TQ.push(e.target)}});pumpThumbs()},{root:$('#thumbs'),rootMargin:'250px'}):null}
+function pumpThumbs(){while(TB<2&&TQ.length){const im=TQ.shift();if(!im.isConnected||im.dataset.done)continue;im.dataset.done=1;TB++;const t=new Image();
+  t.onload=t.onerror=()=>{if(t.naturalWidth&&im.isConnected)im.src=t.src;TB--;pumpThumbs()};t.src=im.dataset.src}}
+function refreshPanes(keep){if(!keep){applyPanes(false);if(PANES.recent)setTimeout(loadRecent,1500)}else if(PANES.pages)buildThumbs()}
+function buildThumbs(){const box=$('#thumbs');box.innerHTML='';S.tw=thumbW();thumbReset();$('#thn').textContent=S.id?S.pages+(S.pages==1?' page':' pages'):'';
  if(!S.id){box.innerHTML='<div class="pe">Open a PDF to see its pages here.</div>';return}
  for(let n=1;n<=S.pages;n++){const[W,H]=S.sizes[n-1]||S.sizes[0],d=document.createElement('div');d.className='th'+(n==S.pg?' cur':'');d.dataset.n=n;
-  d.innerHTML=`<div class="tw" style="aspect-ratio:${W}/${H}"><img loading="lazy" alt="" src="/api/thumb/${S.id}/${n}?w=${thumbW()}&v=${S.ver}"></div>${n}`;
+  const turl=`/api/thumb/${S.id}/${n}?w=${thumbW()}&v=${S.ver}`;
+  d.innerHTML=`<div class="tw" style="aspect-ratio:${W}/${H}"><img alt="" ${TIO?`data-src="${turl}"`:`loading="lazy" src="${turl}"`}></div>${n}`;if(TIO)TIO.observe(d.querySelector('img'));
   d.onclick=()=>{if(curTab=='Home')tab('View');go(n)};d.oncontextmenu=e=>{e.preventDefault();showThumbMenu(n,e.clientX,e.clientY)};box.append(d)}
  markThumb()}
 function markThumb(){const box=$('#thumbs');if(!box||$('#thsec').hidden)return;box.querySelectorAll('.th.cur').forEach(e=>e.classList.remove('cur'));
